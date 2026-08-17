@@ -8,23 +8,35 @@ client — believed to be the first MCP server for Accordance.
 
 Wraps Accordance's `AccdTxRf` Apple event (the app's one reliable data-out
 scripting hook) so an MCP client can pull Bible text directly from your
-installed Accordance modules.
+installed Accordance modules — and navigate the app to anything else.
 
 ### Tools
 
 | Tool | What it does |
 |---|---|
-| `list_modules` | Lists installed Bible text module codes (ESVS, KJVS, NA28-T, …) |
+| `list_modules` | Lists installed Bible **text** module codes (ESVS, KJVS, NA28-T, …) |
 | `get_passage` | Fetches one passage from one module |
 | `compare_translations` | Same passage across several modules, side by side |
-| `open_in_accordance` | Navigates the Accordance UI to a reference (no text returned) |
+| `search_text` | Searches a book (or chapter range) of a text module and returns the matching verses with references |
+| `list_tools` | Lists installed **Tool** modules — commentaries, dictionaries, lexicons (WBC, NICOT, BDAG, HALOT, …) |
+| `open_tool` | Navigates the Accordance UI to a Tool at a reference (for reading in-app) |
+| `open_in_accordance` | Navigates the Accordance UI to a text reference |
+
+`search_text` walks verse by verse over the readable text hook, so it is exact
+but not instant — scope it to a book or a chapter range. It works on any text
+module, including tagged Greek/Hebrew (pass the query in the module's script for
+original-language searches).
 
 ### Known limits
 
-- **Bible text only.** Commentaries and dictionaries (Accordance "Tools" like
-  NICOT, WBC, ZIBBC) have no scripting hook and are not reachable.
+- **Tool *text* cannot be returned.** Commentaries and dictionaries (Accordance
+  "Tools" like NICOT, WBC, ZIBBC) expose no data-out scripting hook, and their
+  displayed text is not retrievable through macOS accessibility either. `list_tools`
+  enumerates them and `open_tool` jumps Accordance to the right place, but the
+  characters stay in the app. Bible **text** modules are fully readable.
 - Reference syntax is Accordance's own: `John 3:16`, `John 3:1-5`, `Psalm 117`.
-- Module codes are the internal `.atext` names. Use `list_modules` to see them.
+- Text-module codes are the internal `.atext` names (see `list_modules`); Tool
+  names are the `.atool` bundle names (see `list_tools`).
 - macOS only (uses `osascript`). Accordance must be installed.
 - If a module cannot render a reference (e.g. John in a Hebrew Bible module),
   the server raises a proper error; `compare_translations` lists it under
@@ -63,6 +75,8 @@ Then add this to your Claude desktop config
 
 ```bash
 .venv/bin/python -c "import accordance_server as s; print(s.get_passage('John 3:16'))"
+.venv/bin/python -c "import accordance_server as s; print(s.search_text('Spirit','Romans',start_chapter=8,end_chapter=8))"
+.venv/bin/python -c "import accordance_server as s; print(s.list_tools())"
 ```
 
 ## Troubleshooting

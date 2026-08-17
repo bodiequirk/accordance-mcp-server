@@ -29,6 +29,7 @@ Notes / limitations:
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -177,6 +178,176 @@ def open_in_accordance(reference: str, module: str = "ESVS") -> str:
     url = f"accord://read/{module}?{url_ref}"
     subprocess.run(["open", url], check=False)
     return f"Asked Accordance to open: {url}"
+
+
+# --------------------------------------------------------------------------- #
+# Tool (commentary/dictionary/lexicon) access — UI + clipboard bridge
+# --------------------------------------------------------------------------- #
+MODULES_ROOT = Path.home() / "Library" / "Application Support" / "Accordance" / "Modules"
+
+
+@mcp.tool()
+def list_tools() -> str:
+    """List installed Accordance *Tool* modules — commentaries, dictionaries,
+    lexicons, study-bible notes — the resources get_passage cannot reach.
+
+    These are read via read_tool (a UI/clipboard bridge), not the text hook.
+    The name shown is the on-disk module filename; that exact spelling is what
+    read_tool's `tool` argument expects.
+    """
+    if not MODULES_ROOT.is_dir():
+        raise RuntimeError(f"Accordance Modules folder not found at: {MODULES_ROOT}")
+    # Accordance Tool modules are .atool bundles (often folders). Match the
+    # bundle itself and DO NOT descend into it, or we'd list its internals.
+    bundles = sorted(MODULES_ROOT.rglob("*.atool"), key=lambda p: str(p).lower())
+    if not bundles:
+        raise RuntimeError(
+            f"No .atool modules found under {MODULES_ROOT}. "
+            f"Subfolders present: {', '.join(sorted(c.name for c in MODULES_ROOT.iterdir() if c.is_dir()))}"
+        )
+    groups: dict[str, list[str]] = {}
+    for p in bundles:
+        rel = p.relative_to(MODULES_ROOT)
+        top = rel.parts[0] if len(rel.parts) > 1 else "(root)"
+        groups.setdefault(top, []).append(p.stem)
+    out: list[str] = [f"{len(bundles)} Tool module(s) installed:"]
+    for folder in sorted(groups):
+        items = sorted(set(groups[folder]))
+        out.append(f"\n=== {folder} ({len(items)}) ===")
+        out.extend(items)
+    return "\n".join(out)
+
+
+@mcp.tool()
+def open_tool(reference: str, tool: str) -> str:
+    """Open an Accordance *Tool* (commentary, dictionary, lexicon) at a reference.
+
+    Accordance exposes no scripting hook to return Tool text, so this navigates
+    the Accordance UI to the right spot for you to read there. (Bible *text* is
+    different and can be pulled back directly — use get_passage / search_text.)
+
+    Args:
+        reference: e.g. "Rom 8:28" for a Scripture-keyed commentary, or a
+            headword/article title for a dictionary.
+        tool: the Tool module name (see list_tools), e.g. "WBC-NT-25", "BDAG".
+    """
+    url_ref = reference.strip().replace(" ", "_")
+    url = f"accord://read/{tool}?{url_ref}"
+    subprocess.run(["open", url], check=False)
+    return f"Opened Accordance to {tool} at {reference}."
+
+
+# --------------------------------------------------------------------------- #
+# Bible-text search (built on the readable AccdTxRf hook, verse by verse)
+# --------------------------------------------------------------------------- #
+def _fetch_single_verse(module: str, book: str, chapter: int, verse: int):
+    """Fetch one verse and parse its trailing "(Book C:V ABBR)" citation.
+
+    Returns (text, actual_chapter, actual_verse), or None if nothing usable.
+    Accordance clamps out-of-range verses to the last real verse, so a returned
+    verse/chapter that differs from what was asked marks an edge (end of chapter
+    or end of book).
+    """
+    raw = _fetch_passage(module, f"{book} {chapter}:{verse}", include_citation=True)
+    m = re.search(r"\(([^()]*)\)\s*$", raw)
+    if not m:
+        return None
+    pairs = re.findall(r"(\d+):(\d+)", m.group(1))
+    if not pairs:
+        return None
+    actual_chapter, actual_verse = int(pairs[-1][0]), int(pairs[-1][1])
+    text = raw[: m.start()].strip()
+    return text, actual_chapter, actual_verse
+
+
+@mcp.tool()
+def search_text(
+    query: str,
+    book: str,
+    module: str = "ESVS",
+    start_chapter: int = 1,
+    end_chapter: int = 0,
+    regex: bool = False,
+    ignore_case: bool = True,
+    max_hits: int = 200,
+    max_verses: int = 4000,
+) -> str:
+    """Search a book (or chapter range) of a Bible *text* module and return the
+    matching verses with their references.
+
+    Works entirely on the readable text hook, walking verse by verse, so it is
+    exact but not instant — scope it to a book or a chapter range. Works on any
+    text module from list_modules, including tagged Greek/Hebrew (pass the query
+    in the module's script for original-language searches).
+
+    Args:
+        query: substring to find (default) or a regular expression if regex=True.
+        book: Accordance book name, e.g. "Romans", "John", "1 Corinthians", "Gen".
+        module: Bible text module code (default "ESVS"). See list_modules.
+        start_chapter: first chapter to scan (default 1).
+        end_chapter: last chapter to scan; 0 means "to the end of the book".
+        regex: treat query as a Python regular expression.
+        ignore_case: case-insensitive match (default True).
+        max_hits: stop after this many matches.
+        max_verses: safety cap on total verses scanned.
+
+    Returns:
+        A header line plus each matching verse, labeled by reference.
+    """
+    flags = re.IGNORECASE if ignore_case else 0
+    if regex:
+        pattern = re.compile(query, flags)
+        def matches(text: str) -> bool:
+            return bool(pattern.search(text))
+    else:
+        needle = query.lower() if ignore_case else query
+        def matches(text: str) -> bool:
+            hay = text.lower() if ignore_case else text
+            return needle in hay
+
+    hits: list[tuple[int, int, str]] = []
+    scanned = 0
+    capped = False
+    chapter = max(1, start_chapter)
+    last_chapter = end_chapter if end_chapter and end_chapter > 0 else 10_000
+
+    while chapter <= last_chapter:
+        verse = 1
+        chapter_had_verses = False
+        while True:
+            if scanned >= max_verses or len(hits) >= max_hits:
+                capped = True
+                break
+            try:
+                result = _fetch_single_verse(module, book, chapter, verse)
+            except RuntimeError:
+                result = None
+            if result is None:
+                break
+            text, actual_chapter, actual_verse = result
+            if actual_chapter != chapter or actual_verse != verse:
+                break  # clamped -> past the end of this chapter (or the book)
+            chapter_had_verses = True
+            scanned += 1
+            if matches(text):
+                hits.append((chapter, actual_verse, text))
+            verse += 1
+        if capped or not chapter_had_verses:
+            break  # no verse 1 in this chapter -> book has ended
+        chapter += 1
+
+    header = (
+        f'Search "{query}" in {book} ({module}): '
+        f"{len(hits)} hit(s), {scanned} verse(s) scanned"
+    )
+    if capped:
+        header += " [stopped at a limit — narrow the scope or raise max_hits/max_verses]"
+    if not hits:
+        return header + "\n(no matches)"
+    lines = [header]
+    for ch, vs, text in hits:
+        lines.append(f"\n{book} {ch}:{vs} — {text}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
