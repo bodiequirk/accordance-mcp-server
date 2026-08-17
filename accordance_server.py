@@ -191,9 +191,10 @@ def list_tools() -> str:
     """List installed Accordance *Tool* modules — commentaries, dictionaries,
     lexicons, study-bible notes — the resources get_passage cannot reach.
 
-    These are read via read_tool (a UI/clipboard bridge), not the text hook.
-    The name shown is the on-disk module filename; that exact spelling is what
-    read_tool's `tool` argument expects.
+    Their text can't be pulled back (Accordance exposes no hook for it); use
+    open_tool to navigate Accordance to one for in-app reading. The name shown
+    is the on-disk module filename; that exact spelling is what open_tool's
+    `tool` argument expects.
     """
     if not MODULES_ROOT.is_dir():
         raise RuntimeError(f"Accordance Modules folder not found at: {MODULES_ROOT}")
